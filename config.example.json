@@ -1,5 +1,5 @@
 {
-  "gateway": "172.30.255.42",
+  "gateway": "172.30.255.42:801",
   "check_url": "http://www1.szu.edu.cn/nc/speedtest/",
   "username": "",
   "password": "",

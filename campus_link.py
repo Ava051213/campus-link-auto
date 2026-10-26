@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""校园网 eportal 自动登录保活脚本（纯标准库，无第三方依赖）。
+"""校园网 eportal 自动登录保活脚本
 
 用法:
     python campus_link.py           常驻保活
@@ -28,7 +28,8 @@ DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_LOG_PATH = BASE_DIR / "campus_link.log"
 
 DEFAULT_CONFIG = {
-    "gateway": "172.30.255.42",
+    # 认证服务在 801 端口，80 端口是另一个 web 服务，访问会 404
+    "gateway": "172.30.255.42:801",
     "check_url": "http://www1.szu.edu.cn/nc/speedtest/",
     "username": "",
     "password": "",
@@ -55,7 +56,7 @@ FONT_IP_RE = re.compile(
 NAMED_IP_RE = re.compile(
     r"(?:您的|你的|本机|Your)\s*IP[^0-9]{0,30}(" + IPV4_PATTERN + r")", re.I
 )
-GATEWAY_IP_RE = re.compile(r"wlan_?user_?ip=([0-9.]+)", re.I)
+GATEWAY_IP_RE = re.compile(r"(?:wlan_?user_?ip|lip|v4ip)=['\"]?([0-9.]+)", re.I)
 CALLBACK_RE = re.compile(r"^[\w$.]*\((.*)\)\s*;?\s*$", re.S)
 
 OK_HINTS = ("成功", "已在线", "已经在线", "无需重复", "success")
@@ -135,7 +136,9 @@ def detect_ip(config: dict, allow_prompt: bool = True) -> tuple[str | None, str]
         logger.debug("检查页不可用: %s", exc)
 
     try:
-        final_url, text = http_get(f"http://{config['gateway']}/", timeout)
+        # 80 端口的门户页含 v4ip/lip 字段，801 端口的 SPA 页没有
+        host = config["gateway"].split(":")[0]
+        final_url, text = http_get(f"http://{host}/", timeout)
         found = ip_from_gateway(final_url, text)
         if found:
             return found, "网关首页"
@@ -224,9 +227,9 @@ def run_round(config: dict, allow_prompt: bool = True) -> bool:
         logger.info("登录成功 ip=%s 来源=%s %s", ip, source, message)
         return True
     if ok is False:
-        logger.error("登录失败 ip=%s %s", ip, message)
+        logger.error("登录失败 ip=%s 来源=%s %s", ip, source, message)
         return False
-    logger.warning("响应无法识别 ip=%s %s", ip, message)
+    logger.warning("响应无法识别 ip=%s 来源=%s %s", ip, source, message)
     return False
 
 

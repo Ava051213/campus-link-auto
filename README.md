@@ -1,6 +1,6 @@
 # campus-link-auto
 
-深大 eportal 校园网自动登录保活。纯标准库，不用 pip 装任何东西——断网时也能直接跑。
+深大 eportal 校园网自动登录保活。
 
 ## 用法
 
@@ -16,15 +16,12 @@ python campus_link.py -i 30 -v  # 30 秒一轮，带调试日志
 ## 文件
 
 - `campus_link.py` 主脚本
-- `config.json` 首次运行自动生成，**密码明文存放**，别提交到仓库
+- `config.json` 首次运行自动生成，**密码明文存放**，不提交到仓库
 - `campus_link.log` 运行日志，1MB 自动轮转 3 份
 
-## 和原脚本的差别
+## 注意
 
-- 抓 IP 不再写死 `>1`，改成认 `<font color="#D00000">` 标签，非 172.30 网段也能用
-- 检查页拿不到 IP 时，退回网关首页的 `wlanuserip` 参数，再退回配置/手输
-- 参数用 `urlencode` 拼装，密码含 `& + % #` 不会截断
-- 请求带超时，系统代理显式清空（原来那行 NO_PROXY 带 scheme 是失效的）
-- Ctrl+C 正常退出，不会再抛 traceback
-- 解析回调里的 `result` / `ret_code` 判断成败，日志能区分"登录成功 / 密码错误 / 响应异常"
-- 手输的 IP 不会再被下一轮循环覆盖成 None
+认证服务在 **801 端口**，80 端口是另一个 web 服务，打过去只会返回 `Error code: 404 URL no found`。
+config.json 里的 gateway 必须带端口：`172.30.255.42:801`。
+
+IP 探测按「测速页 → 80 端口门户页的 v4ip/lip 字段 → 配置/手输」三级降级，换校区换网段一般也能自己找到。
