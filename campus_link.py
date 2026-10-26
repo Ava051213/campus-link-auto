@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "password": "",
     "ip": "",
     "interval": 60,
+    "idle_interval": 120,
     "timeout": 8,
 }
 
@@ -63,6 +64,8 @@ CALLBACK_RE = re.compile(r"^[\w$.]*\((.*)\)\s*;?\s*$", re.S)
 
 OK_HINTS = ("成功", "已在线", "已经在线", "无需重复", "success")
 FAIL_HINTS = ("密码错误", "用户名", "不存在", "欠费", "锁定", "暂停")
+# 网关用这句回绝非宿舍区的认证请求，属于「不需要登录」而不是「登录失败」
+AWAY_HINTS = ("请在宿舍区", "不在宿舍区", "非宿舍区", "AC认证失败")
 
 # 显式清空代理，避免系统代理把内网认证请求带跑偏
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -213,31 +216,37 @@ def analyse_reply(text: str) -> tuple[bool | None, str]:
     return None, summary
 
 
-def run_round(config: dict, allow_prompt: bool = True) -> tuple[bool, bool]:
-    """跑一轮。返回 (是否成功, 是否值得马上重试)。
+def run_round(config: dict, allow_prompt: bool = True) -> tuple[bool, str]:
+    """跑一轮。返回 (是否成功, 状态)。
 
-    第二个值用来区分两种失败：网络没就绪（值得 5 秒后再试）
-    和密码错误这类硬失败（重试也没用，回到正常间隔）。
+    状态取值：
+      ok    - 已登录 / 本来就在线
+      away  - 不在宿舍区，网关明确拒绝，不该继续尝试
+      retry - 网络没就绪之类，值得稍后再试
+      fatal - 密码错误、欠费这类硬失败，重试也没用
     """
     ip, source = detect_ip(config, allow_prompt)
     if not ip:
         logger.warning("没有拿到本机 IP，本轮跳过")
-        return False, True
+        return False, "retry"
 
     try:
         ok, message = login(config, ip)
     except Exception as exc:  # noqa: BLE001
         logger.error("登录请求异常 %s: %s", type(exc).__name__, exc)
-        return False, True
+        return False, "retry"
 
     if ok is True:
         logger.info("登录成功 ip=%s 来源=%s %s", ip, source, message)
-        return True, False
+        return True, "ok"
     if ok is False:
+        if any(hint in message for hint in AWAY_HINTS):
+            logger.debug("不在宿舍区 ip=%s %s", ip, message)
+            return False, "away"
         logger.error("登录失败 ip=%s 来源=%s %s", ip, source, message)
-        return False, False
+        return False, "fatal"
     logger.warning("响应无法识别 ip=%s 来源=%s %s", ip, source, message)
-    return False, True
+    return False, "retry"
 
 
 def claim_singleton():
@@ -264,30 +273,59 @@ def sleep_until(seconds: float) -> bool:
     return time.time() - start > seconds * 2 + 30
 
 
+def gateway_reachable(config: dict) -> bool:
+    """TCP 探一下认证网关。连不上基本可以断定：当前不在校园网里。"""
+    host, _, port = config["gateway"].partition(":")
+    try:
+        with socket.create_connection((host, int(port or 80)), timeout=3):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
 def run_forever(config: dict) -> None:
     interval = max(5.0, float(config["interval"]))
     # 实测网关对同一 IP 的连续认证有限流：5 秒一档约一半请求被 503 打回，
     # 15 秒一档稳定通过，所以快速重试的最短间隔定 15 秒
     retry_interval = min(interval, 15.0)
+    idle_interval = max(30.0, float(config.get("idle_interval", 120)))
     delay = interval
+    away = False
     logger.info(
         "开始保活，间隔 %.0fs，失败后 %.0fs 起快速重试", interval, retry_interval
     )
     while True:
-        try:
-            ok, retryable = run_round(config, allow_prompt=False)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("轮次异常 %s: %s", type(exc).__name__, exc)
-            ok, retryable = False, True
-
-        # 成功回到正常节奏；网络类失败快速重试并逐步退避；
-        # 密码错误这类硬失败不折腾，按正常间隔慢慢试
-        if ok:
-            delay = interval
-        elif retryable:
-            delay = retry_interval if delay >= interval else min(interval, delay * 2)
+        if not gateway_reachable(config):
+            state = "away"
         else:
-            delay = interval
+            try:
+                ok, state = run_round(config, allow_prompt=False)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("轮次异常 %s: %s", type(exc).__name__, exc)
+                ok, state = False, "retry"
+
+        if state == "away":
+            if not away:
+                away = True
+                logger.info(
+                    "不在宿舍区或网关不可达，转入待机（每 %.0fs 检查一次）", idle_interval
+                )
+            delay = idle_interval
+        else:
+            if away:
+                away = False
+                logger.info("网络环境恢复，重新开始保活")
+
+            # 成功回到正常节奏；网络类失败快速重试并逐步退避；
+            # 密码错误这类硬失败不折腾，按正常间隔慢慢试
+            if state == "ok":
+                delay = interval
+            elif state == "retry":
+                delay = (
+                    retry_interval if delay >= interval else min(interval, delay * 2)
+                )
+            else:
+                delay = interval
 
         if sleep_until(delay):
             logger.info("系统休眠唤醒，立即重连")
@@ -402,7 +440,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.once:
-            ok, _ = run_round(config, allow_prompt=False)
+            ok, state = run_round(config, allow_prompt=False)
+            if state == "away":
+                logger.info("当前不在宿舍区，无需登录")
+                return 0
             return 0 if ok else 1
         guard = claim_singleton()
         if guard is None:
