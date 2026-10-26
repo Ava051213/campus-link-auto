@@ -16,6 +16,7 @@ import json
 import logging
 import logging.handlers
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -26,6 +27,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_LOG_PATH = BASE_DIR / "campus_link.log"
+SINGLETON_PORT = 49731
 
 DEFAULT_CONFIG = {
     # 认证服务在 801 端口，80 端口是另一个 web 服务，访问会 404
@@ -233,6 +235,18 @@ def run_round(config: dict, allow_prompt: bool = True) -> bool:
     return False
 
 
+def claim_singleton():
+    """占一个本地端口当锁，保证只有一个常驻实例；进程退出端口自动释放。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", SINGLETON_PORT))
+        sock.listen(1)
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
 def run_forever(config: dict) -> None:
     interval = max(5.0, float(config["interval"]))
     logger.info("开始保活，间隔 %.0fs，Ctrl+C 停止", interval)
@@ -272,7 +286,7 @@ def interactive_setup(config: dict, path: Path) -> None:
     username = input(f"  账号 [{config['username'] or '空'}] : ").strip()
     if username:
         config["username"] = username
-    if sys.stdin.isatty():
+    if has_tty():
         try:
             password = getpass.getpass("  密码: ")
         except Exception:  # noqa: BLE001 - 某些终端不支持
@@ -285,22 +299,32 @@ def interactive_setup(config: dict, path: Path) -> None:
     print(f"已保存到 {path}")
 
 
-def setup_logging(verbose: bool, no_file: bool) -> None:
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
+def has_tty() -> bool:
+    """pythonw 模式下 sys.stdin 是 None，直接 isatty() 会崩。"""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:  # noqa: BLE001
+        return False
 
+
+def setup_logging(verbose: bool, no_file: bool) -> None:
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.handlers.clear()
 
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    logger.addHandler(console)
+
+    # 无控制台（pythonw）时 sys.stdout 为 None，此时只写文件
+    stream = sys.stdout or sys.stderr
+    if stream is not None:
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        console = logging.StreamHandler(stream)
+        console.setFormatter(formatter)
+        logger.addHandler(console)
 
     if not no_file:
         file_handler = logging.handlers.RotatingFileHandler(
@@ -335,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         config["interval"] = args.interval
 
     if args.setup or not config["username"] or not config["password"]:
-        if not sys.stdin.isatty():
+        if not has_tty():
             logger.error("缺少账号密码，且当前非交互终端，请先运行 --setup")
             return 2
         interactive_setup(config, args.config)
@@ -343,6 +367,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.once:
             return 0 if run_round(config, allow_prompt=False) else 1
+        guard = claim_singleton()
+        if guard is None:
+            logger.warning("已有实例在运行，本次退出")
+            return 0
         run_forever(config)
     except KeyboardInterrupt:
         logger.info("已手动停止")
@@ -350,4 +378,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # pythonw 下没有控制台，未捕获异常必须落进日志才查得到
+        logger.exception("未捕获异常，进程退出")
+        raise

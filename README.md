@@ -13,9 +13,22 @@ python campus_link.py -i 30 -v  # 30 秒一轮，带调试日志
 
 后台常驻（不弹黑框）：把启动命令换成 `pythonw campus_link.py`，或用计划任务每分钟跑一次 `python campus_link.py --once`。
 
+## 开机自启（已配置）
+
+Windows 登录时自动拉起，无窗口、无黑框。
+
+- 启动器：`start-silent.vbs`（项目根目录，双击即可立即启动）
+- 自启位置：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\campus-link-auto.vbs`
+- 解释器：`D:\New_Folder\anaconda3\pythonw.exe`（Anaconda 自带，换 Python 时改这两个 vbs 里的路径）
+- 取消自启：删掉启动文件夹里那个 `campus-link-auto.vbs`
+- 确认在跑：任务管理器看有没有 `pythonw.exe`，或看 `campus_link.log` 最新时间戳
+
+内置单实例保护（占用本地端口 49731），重复启动会被拒绝，不会出现两个进程同时登录。
+
 ## 文件
 
 - `campus_link.py` 主脚本
+- `start-silent.vbs` 无窗口启动器
 - `config.json` 首次运行自动生成，**密码明文存放**，不提交到仓库
 - `campus_link.log` 运行日志，1MB 自动轮转 3 份
 
