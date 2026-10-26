@@ -1,0 +1,9 @@
+{
+  "gateway": "172.30.255.42",
+  "check_url": "http://www1.szu.edu.cn/nc/speedtest/",
+  "username": "",
+  "password": "",
+  "ip": "",
+  "interval": 60,
+  "timeout": 8
+}
