@@ -213,26 +213,31 @@ def analyse_reply(text: str) -> tuple[bool | None, str]:
     return None, summary
 
 
-def run_round(config: dict, allow_prompt: bool = True) -> bool:
+def run_round(config: dict, allow_prompt: bool = True) -> tuple[bool, bool]:
+    """跑一轮。返回 (是否成功, 是否值得马上重试)。
+
+    第二个值用来区分两种失败：网络没就绪（值得 5 秒后再试）
+    和密码错误这类硬失败（重试也没用，回到正常间隔）。
+    """
     ip, source = detect_ip(config, allow_prompt)
     if not ip:
         logger.warning("没有拿到本机 IP，本轮跳过")
-        return False
+        return False, True
 
     try:
         ok, message = login(config, ip)
     except Exception as exc:  # noqa: BLE001
         logger.error("登录请求异常 %s: %s", type(exc).__name__, exc)
-        return False
+        return False, True
 
     if ok is True:
         logger.info("登录成功 ip=%s 来源=%s %s", ip, source, message)
-        return True
+        return True, False
     if ok is False:
         logger.error("登录失败 ip=%s 来源=%s %s", ip, source, message)
-        return False
+        return False, False
     logger.warning("响应无法识别 ip=%s 来源=%s %s", ip, source, message)
-    return False
+    return False, True
 
 
 def claim_singleton():
@@ -247,15 +252,44 @@ def claim_singleton():
     return sock
 
 
+def sleep_until(seconds: float) -> bool:
+    """分段睡眠。返回 True 表示墙钟跳变，即中间系统休眠过。"""
+    start = time.time()
+    target = start + seconds
+    while True:
+        remain = target - time.time()
+        if remain <= 0:
+            break
+        time.sleep(min(remain, 5.0))
+    return time.time() - start > seconds * 2 + 30
+
+
 def run_forever(config: dict) -> None:
     interval = max(5.0, float(config["interval"]))
-    logger.info("开始保活，间隔 %.0fs，Ctrl+C 停止", interval)
+    retry_interval = min(interval, 5.0)
+    delay = interval
+    logger.info(
+        "开始保活，间隔 %.0fs，失败后 %.0fs 起快速重试", interval, retry_interval
+    )
     while True:
         try:
-            run_round(config)
+            ok, retryable = run_round(config, allow_prompt=False)
         except Exception as exc:  # noqa: BLE001
             logger.error("轮次异常 %s: %s", type(exc).__name__, exc)
-        time.sleep(interval)
+            ok, retryable = False, True
+
+        # 成功回到正常节奏；网络类失败快速重试并逐步退避；
+        # 密码错误这类硬失败不折腾，按正常间隔慢慢试
+        if ok:
+            delay = interval
+        elif retryable:
+            delay = retry_interval if delay >= interval else min(interval, delay * 2)
+        else:
+            delay = interval
+
+        if sleep_until(delay):
+            logger.info("系统休眠唤醒，立即重连")
+            delay = retry_interval
 
 
 def load_config(path: Path) -> dict:
@@ -366,7 +400,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.once:
-            return 0 if run_round(config, allow_prompt=False) else 1
+            ok, _ = run_round(config, allow_prompt=False)
+            return 0 if ok else 1
         guard = claim_singleton()
         if guard is None:
             logger.warning("已有实例在运行，本次退出")
