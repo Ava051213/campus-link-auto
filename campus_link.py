@@ -266,7 +266,9 @@ def sleep_until(seconds: float) -> bool:
 
 def run_forever(config: dict) -> None:
     interval = max(5.0, float(config["interval"]))
-    retry_interval = min(interval, 5.0)
+    # 实测网关对同一 IP 的连续认证有限流：5 秒一档约一半请求被 503 打回，
+    # 15 秒一档稳定通过，所以快速重试的最短间隔定 15 秒
+    retry_interval = min(interval, 15.0)
     delay = interval
     logger.info(
         "开始保活，间隔 %.0fs，失败后 %.0fs 起快速重试", interval, retry_interval
